@@ -328,18 +328,7 @@ func responseStreamClient(c *gin.Context, stream requester.StreamReaderInterface
 			case err := <-errChan:
 				if !errors.Is(err, io.EOF) {
 					logger.LogError(c.Request.Context(), "Stream err:"+err.Error())
-
-					// 判断是否为上游 OpenAI 格式的错误，提取原始错误信息
-					var streamErr *types.OpenAIErrorWithStatusCode
-					if openaiErr, ok := err.(*types.OpenAIError); ok {
-						streamErr = &types.OpenAIErrorWithStatusCode{
-							OpenAIError: *openaiErr,
-							StatusCode:  http.StatusInternalServerError,
-						}
-					} else {
-						streamErr = common.StringErrorWrapper(err.Error(), "stream_error", http.StatusInternalServerError)
-					}
-					finalErr = streamErr
+					finalErr = streamErrToOpenAIErr(err)
 				} else {
 					// 正常结束，处理endHandler
 					if finalErr == nil && endHandler != nil {
@@ -413,16 +402,7 @@ func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderIn
 			case err := <-errChan:
 				if !errors.Is(err, io.EOF) {
 					logger.LogError(c.Request.Context(), "Stream err:"+err.Error())
-
-					// 判断是否为上游 OpenAI 格式的错误，提取原始错误信息
-					if openaiErr, ok := err.(*types.OpenAIError); ok {
-						finalErr = &types.OpenAIErrorWithStatusCode{
-							OpenAIError: *openaiErr,
-							StatusCode:  http.StatusInternalServerError,
-						}
-					} else {
-						finalErr = common.StringErrorWrapper(err.Error(), "stream_error", http.StatusInternalServerError)
-					}
+					finalErr = streamErrToOpenAIErr(err)
 				} else {
 					// 正常结束，处理endHandler
 					if endHandler != nil {
@@ -492,6 +472,50 @@ func responseCache(c *gin.Context, response string, isStream bool) {
 		c.Data(http.StatusOK, "application/json", []byte(response))
 	}
 
+}
+
+// streamErrToOpenAIErr 将流式错误转换为 OpenAIErrorWithStatusCode，正确识别 ClaudeError 的状态码
+func streamErrToOpenAIErr(err error) *types.OpenAIErrorWithStatusCode {
+	if openaiErr, ok := err.(*types.OpenAIError); ok {
+		return &types.OpenAIErrorWithStatusCode{
+			OpenAIError: *openaiErr,
+			StatusCode:  http.StatusInternalServerError,
+		}
+	}
+
+	// 尝试识别 Claude 错误格式，从错误信息中提取状态码
+	// ClaudeError.Error() 返回的是 JSON 字符串，需要解析出真实状态码
+	type claudeLikeError struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	var claudeErr claudeLikeError
+	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(err.Error())), &claudeErr); jsonErr == nil && claudeErr.Type != "" {
+		statusCode := http.StatusInternalServerError
+		switch claudeErr.Error.Type {
+		case "overloaded_error", "rate_limit_error":
+			statusCode = http.StatusTooManyRequests
+		case "authentication_error", "permission_error":
+			statusCode = http.StatusUnauthorized
+		case "invalid_request_error":
+			statusCode = http.StatusBadRequest
+		case "api_error":
+			statusCode = http.StatusInternalServerError
+		}
+		return &types.OpenAIErrorWithStatusCode{
+			OpenAIError: types.OpenAIError{
+				Message: claudeErr.Error.Message,
+				Type:    claudeErr.Error.Type,
+				Code:    claudeErr.Type,
+			},
+			StatusCode: statusCode,
+		}
+	}
+
+	return common.StringErrorWrapper(err.Error(), "stream_error", http.StatusInternalServerError)
 }
 
 func shouldRetry(c *gin.Context, apiErr *types.OpenAIErrorWithStatusCode, channelType int) bool {
