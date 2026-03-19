@@ -95,6 +95,12 @@ func (r *relayCompletions) send() (err *types.OpenAIErrorWithStatusCode, done bo
 		var firstResponseTime time.Time
 		firstResponseTime, err = responseStreamClient(r.c, response, doneStr)
 		r.SetFirstResponseTime(firstResponseTime)
+		// 若流已开始向客户端写出数据，则不允许重试（done=true）
+		// 若流还未写出任何数据（firstResponseTime 为零值），则允许重试（done 保持 false）
+		if err != nil && !firstResponseTime.IsZero() {
+			done = true
+			return
+		}
 	} else {
 		var response *types.CompletionResponse
 		response, err = provider.CreateCompletion(&r.request)

@@ -327,19 +327,19 @@ func responseStreamClient(c *gin.Context, stream requester.StreamReaderInterface
 
 			case err := <-errChan:
 				if !errors.Is(err, io.EOF) {
-					// 处理错误情况
-					errMsg := "data: " + err.Error() + "\n\n"
-					select {
-					case <-c.Request.Context().Done():
-						// 客户端已断开，不执行任何操作，直接跳过
-					default:
-						// 客户端正常，发送错误信息
-						c.Writer.Write([]byte(errMsg))
-						c.Writer.Flush()
-					}
-
-					finalErr = common.StringErrorWrapper(err.Error(), "stream_error", 900)
 					logger.LogError(c.Request.Context(), "Stream err:"+err.Error())
+
+					// 判断是否为上游 OpenAI 格式的错误，提取原始错误信息
+					var streamErr *types.OpenAIErrorWithStatusCode
+					if openaiErr, ok := err.(*types.OpenAIError); ok {
+						streamErr = &types.OpenAIErrorWithStatusCode{
+							OpenAIError: *openaiErr,
+							StatusCode:  http.StatusInternalServerError,
+						}
+					} else {
+						streamErr = common.StringErrorWrapper(err.Error(), "stream_error", http.StatusInternalServerError)
+					}
+					finalErr = streamErr
 				} else {
 					// 正常结束，处理endHandler
 					if finalErr == nil && endHandler != nil {
@@ -373,7 +373,7 @@ func responseStreamClient(c *gin.Context, stream requester.StreamReaderInterface
 
 	// 等待处理完成
 	<-done
-	return firstResponseTime, nil
+	return firstResponseTime, finalErr
 }
 
 func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderInterface[string], endHandler StreamEndHandler) (firstResponseTime time.Time) {
