@@ -376,13 +376,12 @@ func responseStreamClient(c *gin.Context, stream requester.StreamReaderInterface
 	return firstResponseTime, finalErr
 }
 
-func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderInterface[string], endHandler StreamEndHandler) (firstResponseTime time.Time) {
+func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderInterface[string], endHandler StreamEndHandler) (firstResponseTime time.Time, finalErr *types.OpenAIErrorWithStatusCode) {
 	requester.SetEventStreamHeaders(c)
 	dataChan, errChan := stream.Recv()
 
 	// 创建一个done channel用于通知处理完成
 	done := make(chan struct{})
-	// var finalErr *types.OpenAIErrorWithStatusCode
 
 	defer stream.Close()
 	var isFirstResponse bool
@@ -413,17 +412,17 @@ func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderIn
 
 			case err := <-errChan:
 				if !errors.Is(err, io.EOF) {
-					// 处理错误情况
-					select {
-					case <-c.Request.Context().Done():
-						// 客户端已断开，不执行任何操作，直接跳过
-					default:
-						// 客户端正常，发送错误信息
-						fmt.Fprint(c.Writer, err.Error())
-						c.Writer.Flush()
-					}
-
 					logger.LogError(c.Request.Context(), "Stream err:"+err.Error())
+
+					// 判断是否为上游 OpenAI 格式的错误，提取原始错误信息
+					if openaiErr, ok := err.(*types.OpenAIError); ok {
+						finalErr = &types.OpenAIErrorWithStatusCode{
+							OpenAIError: *openaiErr,
+							StatusCode:  http.StatusInternalServerError,
+						}
+					} else {
+						finalErr = common.StringErrorWrapper(err.Error(), "stream_error", http.StatusInternalServerError)
+					}
 				} else {
 					// 正常结束，处理endHandler
 					if endHandler != nil {
@@ -448,7 +447,7 @@ func responseGeneralStreamClient(c *gin.Context, stream requester.StreamReaderIn
 	// 等待处理完成
 	<-done
 
-	return firstResponseTime
+	return firstResponseTime, finalErr
 }
 
 func responseMultipart(c *gin.Context, resp *http.Response) *types.OpenAIErrorWithStatusCode {
