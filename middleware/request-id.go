@@ -11,7 +11,10 @@ import (
 
 func RequestId() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		id := utils.GetTimeString() + utils.GetRandomString(8)
+		id := c.GetString(logger.RequestIdKey)
+		if id == "" {
+			id = utils.GetTimeString() + utils.GetRandomString(8)
+		}
 		c.Set(logger.RequestIdKey, id)
 		c.Set("requestStartTime", time.Now())
 		ctx := context.WithValue(c.Request.Context(), logger.RequestIdKey, id)
