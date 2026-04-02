@@ -1,16 +1,43 @@
 package model
 
 import (
+	"fmt"
 	"one-api/common"
 	"one-api/common/config"
 	"one-api/common/logger"
 	"strings"
 	"time"
+
+	"gorm.io/gorm/clause"
 )
 
 type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
+}
+
+type DBStats struct {
+	OpenConnections int
+	InUse           int
+	Idle            int
+	WaitCount       int64
+	WaitDuration    time.Duration
+}
+
+func DBStatsSnapshot() DBStats {
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return DBStats{}
+	}
+
+	stats := sqlDB.Stats()
+	return DBStats{
+		OpenConnections: stats.OpenConnections,
+		InUse:           stats.InUse,
+		Idle:            stats.Idle,
+		WaitCount:       stats.WaitCount,
+		WaitDuration:    stats.WaitDuration,
+	}
 }
 
 func AllOption() ([]*Option, error) {
@@ -151,17 +178,29 @@ func SyncOptions(frequency int) {
 }
 
 func UpdateOption(key string, value string) error {
-	// Save to database first
+	start := time.Now()
+
+	statsBefore := DBStatsSnapshot()
+	logger.SysDebug(fmt.Sprintf("[option-debug] db_start key=%s open=%d in_use=%d idle=%d wait_count=%d wait_duration=%s", key, statsBefore.OpenConnections, statsBefore.InUse, statsBefore.Idle, statsBefore.WaitCount, statsBefore.WaitDuration))
+
 	option := Option{
-		Key: key,
+		Key:   key,
+		Value: value,
 	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+
+	err := DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&option).Error
+
+	statsAfter := DBStatsSnapshot()
+	if err != nil {
+		logger.SysError(fmt.Sprintf("[option-debug] db_failed key=%s cost=%s open=%d in_use=%d idle=%d wait_count=%d wait_duration=%s err=%v", key, time.Since(start), statsAfter.OpenConnections, statsAfter.InUse, statsAfter.Idle, statsAfter.WaitCount, statsAfter.WaitDuration, err))
+		return err
+	}
+
+	logger.SysDebug(fmt.Sprintf("[option-debug] db_success key=%s cost=%s open=%d in_use=%d idle=%d wait_count=%d wait_duration=%s", key, time.Since(start), statsAfter.OpenConnections, statsAfter.InUse, statsAfter.Idle, statsAfter.WaitCount, statsAfter.WaitDuration))
+
 	// Update OptionMap
 	return config.GlobalOption.Set(key, value)
 }
